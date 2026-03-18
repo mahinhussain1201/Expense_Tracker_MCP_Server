@@ -1,4 +1,4 @@
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 import os
 import aiosqlite
 import tempfile
@@ -18,60 +18,70 @@ BASE_CURRENCY = "INR"
 
 # -------------------- DATABASE INITIALIZATION --------------------
 def init_db():
-    try:
-        import sqlite3
-        with sqlite3.connect(DB_PATH) as c:
-            c.execute("PRAGMA journal_mode=WAL")
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS expenses(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date TEXT NOT NULL,
-                    amount REAL NOT NULL,
-                    category TEXT NOT NULL,
-                    subcategory TEXT DEFAULT '',
-                    note TEXT DEFAULT ''
-                )
-            """)
-            c.execute("INSERT OR IGNORE INTO expenses(date, amount, category) VALUES ('2000-01-01', 0, 'test')")
-            c.execute("DELETE FROM expenses WHERE category = 'test'")
-            print("Database initialized with write access")
-    except Exception as e:
-        print(f"DB Init Error: {e}")
-        raise
+    import sqlite3
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("PRAGMA journal_mode=WAL")
+
+        # create table with user_id
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS expenses(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                subcategory TEXT DEFAULT '',
+                note TEXT DEFAULT ''
+            )
+        """)
+
+        print("Database initialized with user isolation")
+
 
 init_db()
 
 
+# -------------------- HELPER: GET USER --------------------
+def get_user_id(ctx: Context):
+    return ctx.headers.get("x-user-id", "default_user")
+
+
 # -------------------- ADD EXPENSE --------------------
 @mcp.tool()
-async def add_expense(date, amount, category, subcategory="", note=""):
+async def add_expense(ctx: Context, date, amount, category, subcategory="", note=""):
+    user_id = get_user_id(ctx)
+
     try:
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
-                """INSERT INTO expenses(date, amount, category, subcategory, note)
-                   VALUES (?,?,?,?,?)""",
-                (date, amount, category, subcategory, note)
+                """INSERT INTO expenses(user_id, date, amount, category, subcategory, note)
+                   VALUES (?,?,?,?,?,?)""",
+                (user_id, date, amount, category, subcategory, note)
             )
             await c.commit()
 
             return {
                 "status": "ok",
+                "user_id": user_id,
                 "id": cur.lastrowid,
                 "summary": f"Added {amount} {BASE_CURRENCY} for {category}"
             }
 
     except Exception as e:
-        if "readonly" in str(e).lower():
-            return {"status": "error", "message": "Database is read-only"}
         return {"status": "error", "message": str(e)}
 
 
 # -------------------- DELETE EXPENSE --------------------
 @mcp.tool()
-async def delete_expense(expense_id: int):
+async def delete_expense(ctx: Context, expense_id: int):
+    user_id = get_user_id(ctx)
+
     try:
         async with aiosqlite.connect(DB_PATH) as c:
-            cur = await c.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+            cur = await c.execute(
+                "DELETE FROM expenses WHERE id = ? AND user_id = ?",
+                (expense_id, user_id)
+            )
             await c.commit()
 
             if cur.rowcount == 0:
@@ -85,21 +95,24 @@ async def delete_expense(expense_id: int):
 
 # -------------------- LIST EXPENSES --------------------
 @mcp.tool()
-async def list_expenses(start_date, end_date):
+async def list_expenses(ctx: Context, start_date, end_date):
+    user_id = get_user_id(ctx)
+
     try:
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """SELECT id, date, amount, category, subcategory, note
                    FROM expenses
-                   WHERE date BETWEEN ? AND ?
+                   WHERE user_id = ? AND date BETWEEN ? AND ?
                    ORDER BY date DESC, id DESC""",
-                (start_date, end_date)
+                (user_id, start_date, end_date)
             )
 
             cols = [d[0] for d in cur.description]
             rows = await cur.fetchall()
 
             return {
+                "user_id": user_id,
                 "count": len(rows),
                 "data": [dict(zip(cols, r)) for r in rows]
             }
@@ -110,24 +123,27 @@ async def list_expenses(start_date, end_date):
 
 # -------------------- SUMMARY --------------------
 @mcp.tool()
-async def summarize(start_date, end_date):
+async def summarize(ctx: Context, start_date, end_date):
+    user_id = get_user_id(ctx)
+
     try:
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """
                 SELECT category, SUM(amount)
                 FROM expenses
-                WHERE date BETWEEN ? AND ?
+                WHERE user_id = ? AND date BETWEEN ? AND ?
                 GROUP BY category
                 ORDER BY SUM(amount) DESC
                 """,
-                (start_date, end_date)
+                (user_id, start_date, end_date)
             )
             rows = await cur.fetchall()
 
-        total = sum(r[1] for r in rows)
+        total = sum(r[1] for r in rows) if rows else 0
 
         return {
+            "user_id": user_id,
             "total_spent": total,
             "breakdown": dict(rows),
             "summary": f"Total spending is {total} {BASE_CURRENCY}"
@@ -139,25 +155,28 @@ async def summarize(start_date, end_date):
 
 # -------------------- INSIGHTS --------------------
 @mcp.tool()
-async def spending_insights(start_date, end_date):
+async def spending_insights(ctx: Context, start_date, end_date):
+    user_id = get_user_id(ctx)
+
     try:
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """
                 SELECT category, SUM(amount)
                 FROM expenses
-                WHERE date BETWEEN ? AND ?
+                WHERE user_id = ? AND date BETWEEN ? AND ?
                 GROUP BY category
                 ORDER BY SUM(amount) DESC
                 """,
-                (start_date, end_date)
+                (user_id, start_date, end_date)
             )
             rows = await cur.fetchall()
 
-        total = sum(r[1] for r in rows)
+        total = sum(r[1] for r in rows) if rows else 0
         top = rows[0] if rows else ("None", 0)
 
         return {
+            "user_id": user_id,
             "total_spent": total,
             "top_category": top[0],
             "top_amount": top[1],
@@ -171,18 +190,20 @@ async def spending_insights(start_date, end_date):
 
 # -------------------- PIE CHART --------------------
 @mcp.tool()
-async def category_spending_chart(start_date, end_date):
+async def category_spending_chart(ctx: Context, start_date, end_date):
+    user_id = get_user_id(ctx)
+
     try:
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """
                 SELECT category, SUM(amount)
                 FROM expenses
-                WHERE date BETWEEN ? AND ?
+                WHERE user_id = ? AND date BETWEEN ? AND ?
                 GROUP BY category
                 ORDER BY SUM(amount) DESC
                 """,
-                (start_date, end_date)
+                (user_id, start_date, end_date)
             )
             rows = await cur.fetchall()
 
@@ -198,18 +219,20 @@ async def category_spending_chart(start_date, end_date):
 
 # -------------------- DAILY TREND --------------------
 @mcp.tool()
-async def daily_spending_trend(start_date, end_date):
+async def daily_spending_trend(ctx: Context, start_date, end_date):
+    user_id = get_user_id(ctx)
+
     try:
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """
                 SELECT date, SUM(amount)
                 FROM expenses
-                WHERE date BETWEEN ? AND ?
+                WHERE user_id = ? AND date BETWEEN ? AND ?
                 GROUP BY date
                 ORDER BY date
                 """,
-                (start_date, end_date)
+                (user_id, start_date, end_date)
             )
             rows = await cur.fetchall()
 
@@ -243,7 +266,7 @@ def categories():
         return json.dumps({"error": str(e)})
 
 
-# -------------------- CLAUDE INSTRUCTIONS --------------------
+# -------------------- INSTRUCTIONS --------------------
 @mcp.resource("expense:///instructions", mime_type="text/plain")
 def instructions():
     return """

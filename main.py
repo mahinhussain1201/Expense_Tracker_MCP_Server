@@ -232,4 +232,10 @@ Rules:
 
 # -------------------- ENTRY POINT --------------------
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(
+    transport='http',
+    host="0.0.0.0",
+    port=8000,
+    path="/mcp"
+    ) # for remote
+    # mcp.run() # for local,transport=stdio

@@ -1,15 +1,13 @@
 from fastmcp import FastMCP, Context
 import os
 import aiosqlite
-import tempfile
 import json
+from datetime import datetime
 
 # -------------------- PATH SETUP --------------------
-TEMP_DIR = tempfile.gettempdir()
-DB_PATH = os.path.join(TEMP_DIR, "expenses.db")
-CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
-
-print(f"Database path: {DB_PATH}")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "expenses.db")
+CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.json")
 
 mcp = FastMCP("ExpenseTracker")
 
@@ -19,10 +17,11 @@ BASE_CURRENCY = "INR"
 # -------------------- DATABASE INITIALIZATION --------------------
 def init_db():
     import sqlite3
+
     with sqlite3.connect(DB_PATH) as c:
         c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
 
-        # create table with user_id
         c.execute("""
             CREATE TABLE IF NOT EXISTS expenses(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,15 +34,24 @@ def init_db():
             )
         """)
 
-        print("Database initialized with user isolation")
-
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_date
+            ON expenses(user_id, date)
+        """)
 
 init_db()
 
 
+# -------------------- DATE VALIDATION --------------------
+def validate_date(date_str: str):
+    return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d")
+
+
 # -------------------- HELPER: GET USER --------------------
 def get_user_id(ctx: Context):
-    return ctx.headers.get("x-user-id", "default_user")
+    if hasattr(ctx, "headers") and ctx.headers:
+        return ctx.headers.get("x-user-id", "default_user")
+    return os.getenv("LOCAL_USER_ID", "local_user")
 
 
 # -------------------- ADD EXPENSE --------------------
@@ -52,7 +60,12 @@ async def add_expense(ctx: Context, date, amount, category, subcategory="", note
     user_id = get_user_id(ctx)
 
     try:
+        date = validate_date(date)
+
         async with aiosqlite.connect(DB_PATH) as c:
+            await c.execute("PRAGMA journal_mode=WAL")
+            await c.execute("PRAGMA synchronous=NORMAL")
+
             cur = await c.execute(
                 """INSERT INTO expenses(user_id, date, amount, category, subcategory, note)
                    VALUES (?,?,?,?,?,?)""",
@@ -99,6 +112,9 @@ async def list_expenses(ctx: Context, start_date, end_date):
     user_id = get_user_id(ctx)
 
     try:
+        start_date = validate_date(start_date)
+        end_date = validate_date(end_date)
+
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """SELECT id, date, amount, category, subcategory, note
@@ -127,6 +143,9 @@ async def summarize(ctx: Context, start_date, end_date):
     user_id = get_user_id(ctx)
 
     try:
+        start_date = validate_date(start_date)
+        end_date = validate_date(end_date)
+
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """
@@ -159,6 +178,9 @@ async def spending_insights(ctx: Context, start_date, end_date):
     user_id = get_user_id(ctx)
 
     try:
+        start_date = validate_date(start_date)
+        end_date = validate_date(end_date)
+
         async with aiosqlite.connect(DB_PATH) as c:
             cur = await c.execute(
                 """
@@ -188,105 +210,14 @@ async def spending_insights(ctx: Context, start_date, end_date):
         return {"status": "error", "message": str(e)}
 
 
-# -------------------- PIE CHART --------------------
-@mcp.tool()
-async def category_spending_chart(ctx: Context, start_date, end_date):
-    user_id = get_user_id(ctx)
-
-    try:
-        async with aiosqlite.connect(DB_PATH) as c:
-            cur = await c.execute(
-                """
-                SELECT category, SUM(amount)
-                FROM expenses
-                WHERE user_id = ? AND date BETWEEN ? AND ?
-                GROUP BY category
-                ORDER BY SUM(amount) DESC
-                """,
-                (user_id, start_date, end_date)
-            )
-            rows = await cur.fetchall()
-
-        return {
-            "type": "pie_chart",
-            "labels": [r[0] for r in rows],
-            "values": [r[1] for r in rows]
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-# -------------------- DAILY TREND --------------------
-@mcp.tool()
-async def daily_spending_trend(ctx: Context, start_date, end_date):
-    user_id = get_user_id(ctx)
-
-    try:
-        async with aiosqlite.connect(DB_PATH) as c:
-            cur = await c.execute(
-                """
-                SELECT date, SUM(amount)
-                FROM expenses
-                WHERE user_id = ? AND date BETWEEN ? AND ?
-                GROUP BY date
-                ORDER BY date
-                """,
-                (user_id, start_date, end_date)
-            )
-            rows = await cur.fetchall()
-
-        return {
-            "type": "line_chart",
-            "labels": [r[0] for r in rows],
-            "values": [r[1] for r in rows]
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-# -------------------- CATEGORIES RESOURCE --------------------
-@mcp.resource("expense:///categories", mime_type="application/json")
-def categories():
-    default = {
-        "categories": [
-            "Food", "Transport", "Shopping", "Bills",
-            "Entertainment", "Health", "Travel", "Other"
-        ]
-    }
-
-    try:
-        if os.path.exists(CATEGORIES_PATH):
-            with open(CATEGORIES_PATH, "r") as f:
-                return f.read()
-        return json.dumps(default)
-
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
-# -------------------- INSTRUCTIONS --------------------
-@mcp.resource("expense:///instructions", mime_type="text/plain")
-def instructions():
-    return """
-You are an intelligent expense tracking assistant.
-
-STRICT RULES:
-- ALWAYS call tools when user mentions money/spending
-- NEVER hallucinate values
-- ALWAYS return structured JSON
-- Use summarize for totals
-- Use spending_insights for analysis
-- Use charts for visualization
-"""
-
-
 # -------------------- ENTRY POINT --------------------
 if __name__ == "__main__":
-    mcp.run(
-        transport="http",
-        host="0.0.0.0",
-        port=8000,
-        path="/mcp"
-    )
+    if os.getenv("MODE") == "http":
+        mcp.run(
+            transport="http",
+            host="0.0.0.0",
+            port=8000,
+            path="/mcp"
+        )
+    else:
+        mcp.run()

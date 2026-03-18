@@ -6,7 +6,7 @@ from datetime import datetime
 
 # -------------------- PATH SETUP --------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "expenses.db")
+DB_PATH = "/tmp/expenses.db"
 CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.json")
 
 mcp = FastMCP("ExpenseTracker")

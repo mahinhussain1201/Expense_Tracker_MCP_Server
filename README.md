@@ -139,21 +139,11 @@ Add this to your `claude_desktop_config.json`:
 
 ---
 
-## 📸 Screenshots
-
-![Dashboard Demo](./assets/demo.png)
-*Placeholder for project screenshot*
-
----
-
 ## ⚠️ Limitations
 
 - **Currency**: Fixed to `INR` (can be modified in `main.py`).
 - **Storage**: Default database located at `/tmp/expenses.db` (volatile on restart for some OS).
 - **Authentication**: Basic `x-user-id` header/env support; no OAuth/JWT implemented.
-
----
-
 
 ---
 
